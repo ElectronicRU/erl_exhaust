@@ -16,40 +16,13 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--ifdef(TEST).
+-ifndef(PRODUCTION).
 -include("exhaust-test.hrl").
-
-basic_test() ->
-  List = "A quick brown fox jumps over a lazy dog.",
-  Exhaust = build(List),
-  Lambda = fun
-    Lambda({ok, E, Ex}, Acc) -> Lambda(drop(1, Ex), [E | Acc]);
-    Lambda({error, empty}, Acc) -> Acc
-  end,
-  ?assertEqual(List, lists:reverse(Lambda(drop(1, Exhaust), []))).
 -else.
 -include("exhaust-notest.hrl").
 -endif.
 
--type pair(T) :: ?PAIR(pos_integer(), T, T).
--type tree(T) :: ?BINOM_EMPTY | ?BINOM_TREE(T, tree(pair(T))).
-
--type metatree(T) ::
-%% yellow digit
-?BINOM_TREE(?MASK(T), tree(pair(T))) |
-%% green digit
-?BINOM_TREE(pair(T), tree(pair(T))) |
-%% red digit
-tree(pair(T)).
--type udesc(T) :: T | udesc(pair(T)).
--type desc(T) :: udesc(pair(T)).
--type color() :: green | red.
--type latestack(T) :: metastack(desc(T)).
--type metastack(T) :: ?MSTACK_EMPTY | ?MSTACK(color(), metatree(T), latestack(T)).
-
--type exhaust(T) :: {exhaust, metastack(T)}.
-
-%%% this is more or less an analogue of your usual binomial tree using
+%%% This is more or less an analogue of your usual binomial tree using
 %%% Redundant Binary Representation as outlined by
 %%% "Purely Functional, Real-Time Deques with Catenation" (Kaplan, Tarjan, 1996).
 %%% As we only need to pop, the structure is greatly simplified,
@@ -58,7 +31,7 @@ tree(pair(T)).
 %%% with the property of binomial trees to skip over empty levels.
 %%%
 %%% Regular RBR number is an RBR number that for every Red digit
-%%% (0 in our case) has a less-significant Green digit separated only by
+%%%(0 in our case) has a less-significant Green digit separated only by
 %%% Yellow digits. K/T 1996 calls 0 Red and 2 Green which works better
 %%% for the purposes of addition, but we are subtracting (dropping).
 %%%
@@ -79,16 +52,55 @@ tree(pair(T)).
 %%% actually begins with Red of level V - 1.
 %%%
 %%% Distinguishing between cases of metastack can be a little bit tricky.
+%%%
 %%% If the stack contains at least two entries, we compare their levels; if they are
 %%% equal, it's Green Yellow, otherwise (implied Red) Yellow Yellow.
 %%% If the stack contains only one entry, it's either Red Yellow, or Green.
 %%% If it's at the end, then it's ambigious, but it is safe to rewrite 10 as 2 at the end.
 %%% Otherwise, it involves inspecting the hea dof the next stack.
-%%% However, it's not very practical to do so, and as we use separate structures for
-%%% metastack, simply annotating new entries at time of creation is much easier.
 %%% Finally, if the stack is empty, it means Red followed by Green (or nothing);
 %%% an empty stack is dropped at the end.
+%%%
+%%% However, it's not very practical to do so, and as we use separate structures for
+%%% metastack, simply annotating new entries at time of creation is much easier.
 
+-type pair(T) :: ?PAIR(pos_integer(), T, T).
+-type tree(T) :: ?BINOM_EMPTY | ?BINOM_TREE(T, tree(pair(T))).
+
+-type metatree(T) ::
+%% yellow digit
+?BINOM_TREE(?MASK(T), tree(pair(T))) |
+%% green digit
+?BINOM_TREE(pair(T), tree(pair(T))) |
+%% red digit
+tree(pair(T)).
+-type udesc(T) :: T | udesc(pair(T)).
+-type desc(T) :: udesc(pair(T)).
+-type color() :: green | red.
+-type latestack(T) :: metastack(desc(T)).
+-type metastack(T) :: ?MSTACK_EMPTY | ?MSTACK(color(), metatree(T), latestack(T)).
+
+-type exhaust(T) :: {exhaust, metastack(T)}.
+
+%%% Now that you've familiarized yourself with types, let's talk about why
+%%% stack and metastack are not interleaved.
+%%%
+%%% First of all, it simplifies code, at cost of more function definitions.
+%%%
+%%% Second, let's look at memory usage.
+%%%
+%%% Metastack entry (in PRODUCTION build) takes up 4 words, binom (stack) entry -
+%%% 3 words. Each green digit requires both, as the terminator is constant,
+%%% which adds up to 7 words. Each red digit requires only the metastack entry,
+%%% which is 4 words. Each yellow digit (barring the least significant one,
+%%% which we might consider green for this purpose) takes up only 3 words.
+%%% The complete frequency analysis haven't yet been done by me, but
+%%% anecdotal evidence suggests that yellow digits make up about 50% of the
+%%% structure, which averages out to 3.5 to 5 words per digit (plus constant overhead).
+%%% Using interleaved stacks, we would require 5 words per digit constantly,
+%%% which is unsurprisingly more. With that and the ease of coding in mind
+%%%(I prefer my cases as function names, not as 100 different headers),
+%%% I have decided
 
 %%====================================================================
 %% API functions
@@ -109,19 +121,24 @@ build(List) ->
 %%% Multidrop is not described in K/T 1996, and we do not use
 %%% any kind of tagging, as the level alone of a node can be used to
 %%% determine its size (indeed, for node V it is 2^V).
+%%%
 %%% Instead, let us consider a recursive approach.
 %%% To drop X from a number, we first drop Y \in {0, 1, 2} so that
 %%% X - Y divides 2, and then recursively drop (X - Y) div 2
 %%% from the next digits. Sometimes, we must carry when
 %%% the result would be less than 0, or when it would be 0 and we cannot afford 0
 %%% in this position.
+%%%
 %%% The choices we make are rather trivial. We start in a state in which
 %%% we cannot allow Red, converting thus Green -> Yellow and Yellow -> Green + borrow,
 %%% or leaving everything as is, depending on the odd-even.
 %%% Then, once we have made Green at least once, we have an option to convert the
 %%% next Yellow to Red (with no borrow) or Green to Red (with carry!).
 %%% It is always a good thing to do, as this stops the propagation earlier, bringing
-%% the number closer to zero, and less propagation means less copying.
+%%% the number closer to zero, and less propagation means less copying.
+%%%
+%%% Note that the argument is invalid in imperative setting, because one change down the line
+%%% could potentially replace a series of changes earlier.
 
 -spec drop(HowMuch :: pos_integer(), exhaust(T)) ->
   {ok, LastDropped :: T, Rest :: exhaust(T)} |
@@ -361,6 +378,19 @@ assert_green(?MSTACK(red,BinomTop, MStackRest)) ->
   ?MSTACK(green,?BINOM_TREE(GreenPair, BinRest), MRest);
 assert_green(MStack) ->
   MStack.
+
+-ifdef(EUNIT).
+
+basic_test() ->
+  List = "A quick brown fox jumps over a lazy dog.",
+  Exhaust = build(List),
+  Lambda = fun
+    Lambda({ok, E, Ex}, Acc) -> Lambda(drop(1, Ex), [E | Acc]);
+    Lambda({error, empty}, Acc) -> Acc
+  end,
+  ?assertEqual(List, lists:reverse(Lambda(drop(1, Exhaust), []))).
+
+-endif.
 
 
 %% Phew! If you're reading this, you've earned yourself a free hug.
