@@ -27,8 +27,15 @@
 %%% "Purely Functional, Real-Time Deques with Catenation" (Kaplan, Tarjan, 1996).
 %%% As we only need to pop, the structure is greatly simplified,
 %%% but their method of normalization holds.
-%%% We combine their approach, using Red = 0, Yellow = 1, Green = 2,
-%%% with the property of binomial trees to skip over empty levels.
+%%% We combine their approach, using Red = 1, Yellow = 2, Green = 3,
+%%% with the additional of optional `last node`, which is of size 1
+%%%(or, essentially, 0 when absent), but is always considered green.
+%%% It's easy to see that it doesn't break the properties of RBR
+%%%(and indeed, we could theoretically make it any length at all,
+%%% if not for dropping), as we can always painlessly borrow from it
+%%% if it is present. It is not represented explicitly and is instead just
+%%% a red node with two empty links. This is perhaps slightly less memory
+%%% efficient, but there are less checks going on in the code.
 %%%
 %%% Regular RBR number is an RBR number that for every Red digit
 %%%(0 in our case) has a less-significant Green digit separated only by
@@ -40,67 +47,32 @@
 %%% as R; this has the rather unimportant property of burying the root,
 %%% but since we never actually look at the values, we are able to use what is
 %%% essentially full binary trees.
-%%% !!!NB!!! ?PAIR(V+1,L,R) also represents a green digit of order V;
-%%% this is INTENTIONAL, as it is trivial then to convert irregular
-%%% 1-0 to regular 0-2, and we can always handle the 1-1 or 1-2 coinciding by looking
-%%% at two digits at once.
-%%%
-%%% Metastack entries can begin with either Red or Green, barring the head one
-%%% which can begin with Yellow of order 0. This is the only Yellow that we'll ever wrap,
-%%% because we want to support arbitrary user data.
-%%% Otherwise, if a metastack entry would begin with Yellow of level V, it
-%%% actually begins with Red of level V - 1.
-%%%
-%%% Distinguishing between cases of metastack can be a little bit tricky.
-%%%
-%%% If the stack contains at least two entries, we compare their levels; if they are
-%%% equal, it's Green Yellow, otherwise (implied Red) Yellow Yellow.
-%%% If the stack contains only one entry, it's either Red Yellow, or Green.
-%%% If it's at the end, then it's ambigious, but it is safe to rewrite 10 as 2 at the end.
-%%% Otherwise, it involves inspecting the hea dof the next stack.
-%%% Finally, if the stack is empty, it means Red followed by Green (or nothing);
-%%% an empty stack is dropped at the end.
-%%%
-%%% However, it's not very practical to do so, and as we use separate structures for
-%%% metastack, simply annotating new entries at time of creation is much easier.
 
--type pair(T) :: ?PAIR(pos_integer(), T, T).
--type tree(T) :: ?BINOM_EMPTY | ?BINOM_TREE(T, tree(pair(T))).
+-type pair(T) :: ?PAIR(T, T).
 
--type metatree(T) ::
-%% yellow digit
-?BINOM_TREE(?MASK(T), tree(pair(T))) |
-%% green digit
-?BINOM_TREE(pair(T), tree(pair(T))) |
-%% red digit
-tree(pair(T)).
--type udesc(T) :: T | udesc(pair(T)).
--type desc(T) :: udesc(pair(T)).
--type color() :: green | red.
+-type desc(T) :: pair(T) | desc(pair(T)).
+-type udesc(T) :: udesc(T).
 -type latestack(T) :: metastack(desc(T)).
--type metastack(T) :: ?MSTACK_EMPTY | ?MSTACK(color(), metatree(T), latestack(T)).
+-type stack(T) :: ?YELLOW_NODE(stack(pair(T)),T,T) | ?EMPTY.
+-type metastack(T) ::
+%% red digit
+?RED_NODE(stack(pair(T)), latestack(T), T) |
+%% green digit
+?GREEN_NODE(stack(pair(T)), latestack(T), T, T, T) |
+?EMPTY.
 
--type exhaust(T) :: {exhaust, metastack(T)}.
+-type exhaust(T) :: ?EXHAUST(stack(T), latestack(T)).
 
-%%% Now that you've familiarized yourself with types, let's talk about why
-%%% stack and metastack are not interleaved.
+%%% There used to be a bunch of stuff about why I don't interleave stacks
+%%% here, but it turned out to be a bunch of balderdash.
 %%%
-%%% First of all, it simplifies code, at cost of more function definitions.
-%%%
-%%% Second, let's look at memory usage.
-%%%
-%%% Metastack entry (in PRODUCTION build) takes up 4 words, binom (stack) entry -
-%%% 3 words. Each green digit requires both, as the terminator is constant,
-%%% which adds up to 7 words. Each red digit requires only the metastack entry,
-%%% which is 4 words. Each yellow digit (barring the least significant one,
-%%% which we might consider green for this purpose) takes up only 3 words.
-%%% The complete frequency analysis haven't yet been done by me, but
-%%% anecdotal evidence suggests that yellow digits make up about 50% of the
-%%% structure, which averages out to 3.5 to 5 words per digit (plus constant overhead).
-%%% Using interleaved stacks, we would require 5 words per digit constantly,
-%%% which is unsurprisingly more. With that and the ease of coding in mind
-%%%(I prefer my cases as function names, not as 100 different headers),
-%%% I have decided
+%%% Turns out that tuple size can carry a lot of information, and in PRODUCTION
+%%% build, it makes our coffee for us, pretty much.
+%%% That amounts to 6 words for Green, 4 for Yellow and 3 for Red;
+%%% the anecdotal evidence is that numbers tend to be about 50% yellow,
+%%% which is no worse than 5 per digit in a log-3 setting!
+%%% So, we use about 5 log_3(N) words for N elements (plus up to a constant amount),
+%%% which is amazing, if you ask me.
 
 %%====================================================================
 %% API functions
@@ -109,275 +81,243 @@ tree(pair(T)).
 -spec build([T]) -> exhaust(T).
 build(List) ->
   Length = length(List),
-  if
-    Length rem 2 == 0 ->
-      {exhaust, build_green(List, Length, [], 0)};
-    true ->
-      %% mask the last element
-      [Element | Rest] = List,
-      {exhaust, build_green([?MASK(Element) | Rest], Length, [], 0)}
-  end.
+  build_green(List, Length, []).
 
 %%% Multidrop is not described in K/T 1996, and we do not use
 %%% any kind of tagging, as the level alone of a node can be used to
 %%% determine its size (indeed, for node V it is 2^V).
 %%%
-%%% Instead, let us consider a recursive approach.
-%%% To drop X from a number, we first drop Y \in {0, 1, 2} so that
-%%% X - Y divides 2, and then recursively drop (X - Y) div 2
-%%% from the next digits. Sometimes, we must carry when
-%%% the result would be less than 0, or when it would be 0 and we cannot afford 0
-%%% in this position.
-%%%
-%%% The choices we make are rather trivial. We start in a state in which
-%%% we cannot allow Red, converting thus Green -> Yellow and Yellow -> Green + borrow,
-%%% or leaving everything as is, depending on the odd-even.
-%%% Then, once we have made Green at least once, we have an option to convert the
-%%% next Yellow to Red (with no borrow) or Green to Red (with carry!).
-%%% It is always a good thing to do, as this stops the propagation earlier, bringing
-%%% the number closer to zero, and less propagation means less copying.
-%%%
-%%% Note that the argument is invalid in imperative setting, because one change down the line
-%%% could potentially replace a series of changes earlier.
+%%% Our approach is twofold. At first, we dynamically subtract a given
+%%% number from our representation: 1 or 2 from green levels, 0 or 1 from yellow,
+%%%(depending on parity)
+%%% and 0 from red. It is achieved by levels passing up how much they would like
+%%% their parent to take upon themselves, and passing down how much they weren't
+%%% in fact able to take. It is trivial to show that whatever gets passed out of the least
+%%% significant node is how many entries were asked to be dropped, but are not present.
+%%% Secondly, we run over any newly-created metastack entries (possibly also the next one,
+%%% as it could have lost cover) and replace contiguous sequences of Red with Yellow...Green.
+%%% It is essentially a generalization of a method outlined in K/T 1996,
+%%% and indeed degenerates to it when at most 1 new metastack entry was created.
+
 
 -spec drop(HowMuch :: pos_integer(), exhaust(T)) ->
   {ok, LastDropped :: T, Rest :: exhaust(T)} |
-  {error, atom()}.
-drop(_, {exhaust, ?MSTACK_EMPTY}) ->
-  {error, empty};
+  {too_much, Remain :: pos_integer(), LastDropped :: T, Rest :: exhaust(T)}.
 drop(0, _) ->
   error(badarg);
-drop(HowMuch, {exhaust, ?MSTACK(_Type,Tree,MStack)}) ->
-  try
-    drop_0(Tree, MStack, HowMuch)
-  of
-    {Element, MStack1} ->
-      {ok, Element, {exhaust, MStack1}}
-  catch
-    E = {error, _}  -> E
+drop(HowMuch, ?EXHAUST(Stack,Meta)) ->
+  {Rest, Last, Stack1, Meta1} = sub(HowMuch, Stack, [], Meta),
+  Meta2 = straighten(Meta1),
+  case Rest of
+    0 ->
+      {ok, Last, ?EXHAUST(Stack1,Meta2)};
+    _ ->
+      {too_much, Rest, Last, ?EXHAUST(Stack1,Meta2)}
   end.
+
 
 
 %%====================================================================
 %% Internal functions
 %%====================================================================
-
--spec metastack_new(color(), metatree(T), latestack(T)) -> metastack(T).
-metastack_new(red, ?BINOM_EMPTY, ?MSTACK_EMPTY) ->
-  ?MSTACK_EMPTY;
-metastack_new(Type, Stack, MStack) ->
-  ?MSTACK(Type, Stack, MStack).
-
--spec build_green([?MASK(T) | [T]], non_neg_integer(), [udesc(T)], non_neg_integer()) ->
-  metastack(T).
+-type pairtriple(U) :: {U, U} | {U, U, U}.
+-type gryellow(T) :: pairtriple(T) | gryellow(pair(T)).
+-spec build_green([T], non_neg_integer(), [gryellow(T)]) ->
+  exhaust(T).
 %% We want to make as little metastacks as possible.
 %% We have a choice between red and green, as both are 0 modulo 2,
 %% however, there is no benefit to ever choosing red, as we can encode the
-%% entire thing rather compactly using only green and yellow.
-build_green([], 0, Stack, Level) ->
-  build_finish(Stack, Level, ?BINOM_EMPTY, ?MSTACK_EMPTY);
-%% making a green digit (2)
-build_green(Elements, NElements, Stack, Level) when NElements rem 2 == 0 ->
-  [OurPair | Pairs] = build_pairs(Elements, Level),
-  build_green(Pairs, NElements div 2 - 1, [OurPair | Stack], Level + 1);
-%% making a yellow digit (1)
-build_green([Element | Elements], NElements, Stack, Level) ->
-  build_green(build_pairs(Elements, Level), NElements div 2, [Element | Stack], Level + 1).
+%% entire thing rather compactly using only green and yellow, and maybe one red.
+build_green([], 0, Stack) ->
+  build_finish(Stack, ?EMPTY, ?EMPTY);
+build_green([E1], 1, Stack) ->
+  Last = ?RED_NODE(?EMPTY,?EMPTY,E1),
+  build_finish(Stack, ?EMPTY, Last);
+%% making a yellow digit (2)
+build_green([E1, E2 | Elements], NElements, Stack) when NElements rem 2 == 0 ->
+  Elements1 = build_pairs(Elements),
+  build_green(Elements1, NElements div 2 - 1, [{E1, E2}|Stack]);
+%% making a green digit (3)
+build_green([E1, E2, E3 | Elements], NElements, Stack) ->
+  Elements1 = build_pairs(Elements),
+  build_green(Elements1, NElements div 2 - 1, [{E1, E2, E3} | Stack]).
 
--spec build_finish([udesc(T)], non_neg_integer(), metatree(udesc(T)), metastack(udesc(T))) ->
-  metastack(T).
+-spec build_finish([udesc(T)], stack(udesc(T)), metastack(udesc(T))) ->
+  exhaust(T).
 %% as of recent Erlangs, body-recursive builder functions are about as fast as tail-recursive ones.
-build_finish([], _Level, ?BINOM_EMPTY, Metastack) ->
-  Metastack;
-build_finish([], _Level, Stack, Metastack) ->
-  ?MSTACK(red, Stack, Metastack);
+build_finish([], Stack, Metastack) ->
+  ?EXHAUST(Stack, Metastack);
 %% green digit
-build_finish([?PAIR(Level, _, _) = Element | Rest], Level, Stack, Metastack) ->
-  Metastack1 = ?MSTACK(green, ?BINOM_TREE(Element, Stack),Metastack),
-  build_finish(Rest, Level - 1, ?BINOM_EMPTY, Metastack1);
+build_finish([{E1, E2, E3} | Rest], Stack, Metastack) ->
+  Green = ?GREEN_NODE(Stack, Metastack, E1, E2, E3),
+  build_finish(Rest, ?EMPTY, Green);
 %% yellow digit
-build_finish([Yellow | Rest], Level, Stack, Metastack) ->
-  build_finish(Rest, Level - 1, ?BINOM_TREE(Yellow, Stack), Metastack).
+build_finish([{E1, E2} | Rest], Stack, Metastack) ->
+  Yellow = ?YELLOW_NODE(Stack, E1, E2),
+  build_finish(Rest, Yellow, Metastack).
 
--spec build_pairs([T], pos_integer()) -> [pair(T)].
-build_pairs([], _) -> [];
-build_pairs([Element1, Element2 | Rest], Level) ->
-  [?PAIR(Level + 1, Element1, Element2) | build_pairs(Rest, Level)].
+-spec build_pairs([T]) -> [pair(T)].
+build_pairs([]) -> [];
+build_pairs([Element1, Element2 | Rest]) ->
+  [?PAIR(Element1, Element2) | build_pairs(Rest)].
+
+-type operation(T) :: ?OPZERO(0 | 1, T) | ?OPONE(0 | 1, T, T) | ?OPTWO(1 | 2, T, T, T).
+-type opstack(T) :: [operation(udesc(T))].
+-type execute_result(T) :: {Rest :: non_neg_integer(), LastDropped :: T | ?EMPTY,
+                            stack(T), metastack(T)}.
+
+-spec sub(HowMuch :: non_neg_integer(), Stack :: stack(U), Ops, Meta :: latestack(U)) ->
+  execute_result(T) when U :: udesc(T), Ops :: opstack(T).
+%% this first to create LAST_NODE.
+sub(N, ?EMPTY, Ops, ?EMPTY) ->
+  cull(N, Ops, ?EMPTY);
+sub(0, Stack, Ops, Meta) ->
+  execute(0, Ops, ?EMPTY, Stack, Meta);
+sub(N, ?YELLOW_NODE(Next, E1, E2), Ops, Meta) ->
+  sub(N div 2, Next, [?OPONE(N rem 2,E1,E2) | Ops], Meta);
+sub(N, ?EMPTY, Ops, ?GREEN_NODE(Next, NextMeta, E1, E2, E3)) ->
+  Rem = 2 - (N rem 2), %% this is necessary because we always want to take away at least 1
+  sub((N - Rem) div 2, Next, [?OPTWO(Rem,E1,E2,E3) | Ops], NextMeta);
+sub(N, ?EMPTY, Ops, ?RED_NODE(Next, NextMeta, E1)) ->
+  sub(N div 2, Next, [?OPZERO(N rem 2,E1) | Ops], NextMeta).
+
+%% Here the stuff gets actually interesting.
+-type cache(T) :: ?EMPTY | pair(T).
+-type cacheout(T) :: ?EMPTY | T.
+
+%% This simulates a max-size-2 queue, putting from the left, getting from the right.
+%% Putting as much elements into cache as many arguments are;
+%% getting as much as the name of the function suggests.
+-spec qput(operation(T), cache(T)) -> cacheout(T).
+qput(_, ?PAIR(_,Right)) ->
+  Right;
+qput(?OPZERO(_,E1), ?EMPTY) ->
+  E1;
+qput(?OPONE(_,_,E2), ?EMPTY) ->
+  E2;
+qput(?OPTWO(_,_,_,E3), ?EMPTY) ->
+  E3.
+
+-type result(T) :: {cacheout(T), T} | {cacheout(T), T, T}.
+-spec qshift(operation(T), Into :: 0 | 1 | 2, cache(T)) -> result(T).
+qshift(?OPZERO(_,_), 0, ?PAIR(Left,Right)) ->
+  {Left, Right};
+qshift(?OPONE(_,_,E2), 0, ?PAIR(Left,Right)) ->
+  {E2, Left, Right};
+qshift(?OPONE(_,_,_), 1, ?PAIR(Left,Right)) ->
+  {Left, Right};
+qshift(?OPTWO(_,_,_,E3), 1, ?PAIR(Left,Right)) ->
+  {E3, Left, Right};
+qshift(?OPTWO(_,_,_,_), 2, ?PAIR(Left,Right)) ->
+  {Left, Right};
+qshift(?OPZERO(_,E1), 0, ?EMPTY) ->
+  {?EMPTY, E1};
+qshift(?OPONE(_,E1,E2), 1, ?EMPTY) ->
+  {E1, E2};
+qshift(?OPTWO(_,E1,E2,E3), 1, ?EMPTY) ->
+  {E1, E2, E3};
+qshift(?OPTWO(_,_,E2,E3), 2, ?EMPTY) ->
+  {E2, E3}.
+
+-spec shift_op(operation(T), HowMuch :: non_neg_integer(), cache(T)) ->
+  {Rest :: non_neg_integer(), result(T)}.
+shift_op(?OPZERO(V,_) = Op, HowMuch, Cache) ->
+  {HowMuch + V, qshift(Op, 0, Cache)};
+shift_op(?OPONE(0,_,_) = Op, 0, Cache) ->
+  {0, qshift(Op, 0, Cache)};
+shift_op(?OPONE(V,_,_) = Op, HowMuch, Cache) ->
+  {HowMuch + V - 1, qshift(Op, 1, Cache)};
+shift_op(?OPTWO(V,_,_,_) = Op, HowMuch, Cache) when HowMuch + V < 2 ->
+  {0, qshift(Op, HowMuch + V, Cache)};
+shift_op(?OPTWO(V,_,_,_) = Op, HowMuch, Cache) ->
+  {HowMuch + V - 2, qshift(Op, 2, Cache)}.
+
+-spec cull_op(operation(T), HowMuch :: non_neg_integer(), cache(T)) ->
+  {Rest :: non_neg_integer(), {cacheout(T)}} |
+  {Rest :: non_neg_integer(), result(T)}.
+cull_op(?OPZERO(V,_) = Op, HowMuch, Cache) when HowMuch + V >= 1 ->
+  {HowMuch + V - 1, {qput(Op, Cache)}};
+cull_op(?OPONE(V,_,_) = Op, HowMuch, Cache) when HowMuch + V >= 2 ->
+  {HowMuch + V - 2, {qput(Op, Cache)}};
+cull_op(?OPTWO(V,_,_,_) = Op, HowMuch, Cache) when HowMuch + V >= 3 ->
+  {HowMuch + V - 3, {qput(Op, Cache)}};
+cull_op(Op, HowMuch, Cache) ->
+  shift_op(Op, HowMuch, Cache).
+
+%% Rebuild from an empty base, dropping empties.
+-spec cull(DropFirst :: non_neg_integer(), opstack(T), cacheout(desc(T))) ->
+  execute_result(T).
+cull(N, [Op | Tail], Cache) ->
+  {Rest, Result} = cull_op(Op, N * 2, Cache),
+  case Result of
+    {CacheOut} ->
+      cull(Rest, Tail, CacheOut);
+    {CacheOut, E1} ->
+      execute(N, Tail, CacheOut, ?EMPTY, ?RED_NODE(?EMPTY,?EMPTY,E1));
+    {CacheOut, E1,E2} ->
+      execute(N, Tail, CacheOut, ?YELLOW_NODE(?EMPTY,E1,E2), ?EMPTY)
+  end;
+%% the stack is empty now
+cull(N, [], Cache) ->
+  {N, Cache, ?EMPTY, ?EMPTY}.
+
+-spec execute(DropFirst :: non_neg_integer(), opstack(T), cacheout(desc(T)),
+  stack(U), latestack(U)) ->
+  execute_result(T) when U :: udesc(T).
+
+execute(N, [Op | Tail], Cache, Stack, Metastack) ->
+  {Rest, Result} = shift_op(Op, N, Cache),
+  Rest1 = Rest * 2,
+  case Result of
+    {CacheOut, E1} ->
+      Red = ?RED_NODE(Stack,Metastack,E1),
+      execute(Rest1, Tail, CacheOut, ?EMPTY, Red);
+    {CacheOut, E1, E2} ->
+      Yellow = ?YELLOW_NODE(Stack,E1,E2),
+      execute(Rest1, Tail, CacheOut, Yellow, Metastack)
+  end;
+execute(N, [], Cache, Stack, Metastack) ->
+  {N, Cache, Stack, Metastack}.
 
 
--spec drop_0(metatree(T), latestack(T), pos_integer()) -> {T, metastack(T)}.
-%% drop from level 0: special mask handling, and HowMuch is always non-0
-%% return type is also different for ease of handling
-%% case one element
-drop_0(?BINOM_TREE(?MASK(Element), ?BINOM_EMPTY),
-               ?MSTACK_EMPTY, _HowMuch) ->
-  {Element, ?MSTACK_EMPTY};
-%% case Yellow, odd
-drop_0(?BINOM_TREE(?MASK(Element), BinomRest),
-       MStackRest, HowMuch) when HowMuch rem 2 == 1 ->
-  %% borrow a green digit
-  {Pair, BinRest, MRest} = drop_green(BinomRest, MStackRest, HowMuch div 2 + 1),
-  BinomTree = ?BINOM_TREE(Pair, BinRest),
-  {Element, ?MSTACK(green,BinomTree,MRest)};
-%% case Yellow, even
-drop_0(?BINOM_TREE(?MASK(_), BinomRest),
-       MStackRest, HowMuch) when HowMuch rem 2 == 0 ->
-  %% shift an yellow digit
-  {Pair, BinRest, MRest} = drop_red(BinomRest, MStackRest, HowMuch div 2),
-  ?PAIR(1, LastDropped, Remaining) = Pair,
-  BinomTree = ?BINOM_TREE(?MASK(Remaining), BinRest),
-  {LastDropped, ?MSTACK(red,BinomTree,MRest)};
-%% case Green, odd
-%% small dragons: the change may not propagate far enough,
-%% so we apply a constant-time fixing (see K/T 1996 too).
-drop_0(?BINOM_TREE(OurPair, BinomRest),
-       MStackRest, HowMuch) when HowMuch rem 2 == 1 ->
-  {Pair, BinRest, MRest} = drop_red(BinomRest, MStackRest, HowMuch div 2, OurPair),
-  ?PAIR(1, LastDropped, Remaining) = Pair,
-  BinomTree = ?BINOM_TREE(?MASK(Remaining), BinRest),
-  MRest1 = assert_green(MRest),
-  {LastDropped, ?MSTACK(red,BinomTree,MRest1)};
-%% case Green, even
-drop_0(?BINOM_TREE(OurPair, BinomRest),
-       MStackRest, HowMuch) when HowMuch rem 2 == 0 ->
-  %% borrow a green digit
-  {Pair, BinRest, MRest} = drop_green(BinomRest, MStackRest, HowMuch div 2),
-  BinomTree = ?BINOM_TREE(Pair,BinRest),
-  ?PAIR(1, _, Element) = OurPair,
-  {Element, ?MSTACK(green,BinomTree,MRest)}.
+%% we only create Red, Yellow and Last nodes ourselves, thus we
+%% don't exactly plan on encountering any (barring one)
+%% Green nodes here.
+-spec straighten(metastack(T)) -> metastack(T).
+straighten(?RED_NODE(?EMPTY,?EMPTY,_) = Last) ->
+  Last;
+straighten(?RED_NODE(?EMPTY,Meta,E1)) ->
+  {?PAIR(E2, E3), Stack, Metastack} = borrow(Meta),
+  ?GREEN_NODE(Stack,Metastack,E1,E2,E3);
+straighten(?RED_NODE(Stack,Meta,E1)) ->
+  ?YELLOW_NODE(Stack1,?PAIR(E2,E3),E02) = Stack,
+  %% we gonna make a red node here, march on.
+  Meta1 = straighten(Meta),
+  RedMeta = ?RED_NODE(Stack1,Meta1,E02),
+  ?GREEN_NODE(?EMPTY,RedMeta,E1,E2,E3);
+straighten(GreenOrEmpty) ->
+  GreenOrEmpty.
 
-%% for the rest, drop_yellow and drop_green:
-%% drop_red -> we cannot make a red (after red),
-%% drop_green -> we can make a red (after green).
-%% spec: Level, TopStack, RestOfMetastack, HowMuch, [DefaultReturn].
-%% returns: Dropped, NewTopStack, NewRestOfMetastack.
-%% this is intended to walk YELLOW NODES ONLY.
-%% all reds are covered by construction, as we only ever make a red after a green.
+-spec borrow(metastack(pair(T))) ->
+  {T, stack(T), latestack(T)}.
+borrow(?RED_NODE(?EMPTY,?EMPTY,E1)) ->
+  {E1, ?EMPTY, ?EMPTY};
+borrow(?RED_NODE(?EMPTY,Meta,E1)) ->
+  {?PAIR(E2, E3), Stack, Metastack} = borrow(Meta),
+  Yellow = ?YELLOW_NODE(Stack, E2, E3),
+  {E1, Yellow, Metastack};
+borrow(?RED_NODE(Stack,Meta,E1)) ->
+  ?YELLOW_NODE(Stack1,?PAIR(E2,E3),E4) = Stack,
+  Meta1 = straighten(Meta),
+  Yellow = ?YELLOW_NODE(?EMPTY,E2,E3),
+  %% small dragons: don't leave
+  {E1, Yellow, ?RED_NODE(Stack1, Meta1, E4)};
+borrow(?GREEN_NODE(Stack,Meta,E1,E2,E3)) ->
+  Yellow = ?YELLOW_NODE(Stack,E2,E3),
+  %% at the of borrow, we always create a green node,
+  %% and past the natural green, there is no chaos we caused.
+  {E1, Yellow, Meta}.
 
--spec drop_red(tree(T), latestack(T), non_neg_integer(), T) ->
-  {T, tree(T), latestack(T)}.
-drop_red(BinomTop, MStackRest, _HowMuch = 0, Default) ->
-  {Default, BinomTop, MStackRest};
-drop_red(BinomTop, MStackRest, HowMuch, _Default) ->
-  drop_red(BinomTop, MStackRest, HowMuch).
-
--spec drop_red(tree(T), latestack(T), pos_integer()) ->
-  {T, tree(T), latestack(T)}.
-drop_red(?BINOM_EMPTY, MStackRest, HowMuch) ->
-  %% we have made a red where we were able to. The next metastack entry ought to begin with green or yellow.
-  force_green(MStackRest, HowMuch);
-%% Yellow after Red, even.
-drop_red(?BINOM_TREE(_OurPair,BinomRest), MStackRest,
-         HowMuch) when HowMuch rem 2 == 0 ->
-  {Pair, BinRest, MRest} = drop_red(BinomRest, MStackRest, HowMuch div 2),
-  ?PAIR(_, LastDropped, Remaining) = Pair,
-  BinomTree = ?BINOM_TREE(Remaining,BinRest),
-  {LastDropped, BinomTree, MRest};
-%% Yellow after Red, odd.
-drop_red(?BINOM_TREE(OurPair,BinomRest), MStackRest,
-         HowMuch) when HowMuch rem 2 == 1 ->
-  {Pair, BinRest, MRest} = drop_green(BinomRest, MStackRest, HowMuch div 2 + 1),
-  BinomTree = ?BINOM_TREE(Pair,BinRest),
-  %% here we have made a new metastack entry.
-  MRest1 = ?MSTACK(green,BinomTree,MRest),
-  {OurPair, ?BINOM_EMPTY, MRest1}.
-
--spec drop_green(tree(T), latestack(T), non_neg_integer(), T) ->
-  {T, tree(T), latestack(T)}.
-drop_green(BinomTop, MStackRest, _HowMuch = 0, Default) ->
-  {Default, BinomTop, MStackRest};
-drop_green(BinomTop, MStackRest, HowMuch, _Default) ->
-  drop_green(BinomTop, MStackRest, HowMuch).
-
--spec drop_green(tree(T), latestack(T), pos_integer()) ->
-  {T, tree(T), latestack(T)}.
-drop_green(?BINOM_EMPTY, MStackRest, HowMuch) ->
-  %% we are after green, we want to make red if we are able to.
-  force_red(MStackRest, HowMuch);
-%% Yellow after Green, even.
-drop_green(?BINOM_TREE(OurPair,BinomRest), MStackRest,
-           HowMuch) when HowMuch rem 2 == 0 ->
-  {Pair, BinRest, MRest} = drop_green(BinomRest, MStackRest, HowMuch div 2 - 1, OurPair),
-  ?PAIR(_, LastDropped, Remaining) = Pair,
-  BinomTree = ?BINOM_TREE(Remaining,BinRest),
-  {LastDropped, BinomTree, MRest};
-%% Yellow after Green, odd.
-drop_green(?BINOM_TREE(OurPair,BinomRest), MStackRest,
-           HowMuch) when HowMuch rem 2 == 1 ->
-  {Pair, BinRest, MRest} = drop_green(BinomRest, MStackRest, HowMuch div 2, OurPair),
-  %% dropping the pair, making the red. Check for empty here.
-  MRest1 = metastack_new(red, BinRest,MRest),
-  {Pair, ?BINOM_EMPTY, MRest1}.
-
-%% helper functions, force last digit to 0
--spec drop_to_zero_red(color(), metatree(T), latestack(T), pos_integer()) ->
-  {T, metatree(pair(T)), latestack(T)}.
-drop_to_zero_red(red, Binom, MStackRest, HowMuchForRed) ->
-  drop_red(Binom, MStackRest, HowMuchForRed);
-drop_to_zero_red(green, ?BINOM_TREE(GreenDigit,BinomRest), MStackRest, HowMuchForRed) ->
-  drop_red(BinomRest, MStackRest, HowMuchForRed - 1, GreenDigit).
-
--spec drop_to_zero_green(color(), metatree(T), latestack(T), pos_integer()) ->
-  {T, metatree(pair(T)), latestack(T)}.
-drop_to_zero_green(red, Binom, MStackRest, HowMuchForRed) ->
-  drop_green(Binom, MStackRest, HowMuchForRed);
-drop_to_zero_green(green, ?BINOM_TREE(GreenDigit,BinomRest), MStackRest, HowMuchForRed) ->
-  drop_green(BinomRest, MStackRest, HowMuchForRed - 1, GreenDigit).
-
-
--spec force_red(latestack(T), pos_integer()) ->
-  {T, metatree(T), latestack(T)}.
-%% spec here: metastack, how much to drop
-%% returns: dropped, top stack (if we converted to yellow, to merge), the rest of metastack
-force_red(?MSTACK_EMPTY, _HowMuch) ->
-  throw({error, dropped_too_much});
-%% odd: to yellow.
-force_red(?MSTACK(Type,BinomTop,MStackRest), HowMuch) when HowMuch rem 2 == 1 ->
-  {DroppedPair, BinRest, MRest} = drop_to_zero_green(Type, BinomTop, MStackRest, HowMuch div 2 + 1),
-  ?PAIR(_,Dropped,YellowSpoils) = DroppedPair,
-  {Dropped, ?BINOM_TREE(YellowSpoils,BinRest), MRest};
-force_red(?MSTACK(Type,BinomTop,MStackRest), HowMuch) when HowMuch rem 2 == 0 ->
-  %% NB: the color flips, since we are making a red digit.
-  {DroppedPair, BinRest, MRest} = drop_to_zero_red(Type, BinomTop, MStackRest, HowMuch div 2),
-  ?PAIR(_,_Annihilated,Dropped) = DroppedPair,
-  MRest1 = metastack_new(red, BinRest, MRest),
-  {Dropped, ?BINOM_EMPTY, MRest1}.
-
--spec force_green(latestack(T), pos_integer()) ->
-  {T, metatree(T), latestack(T)}.
-force_green(?MSTACK_EMPTY, _HowMuch) ->
-  throw({error, dropped_too_much});
-%% odd: to yellow. Yep, copy/paste with drop_green replaced by drop_red.
-force_green(?MSTACK(Type,BinomTop,MStackRest), HowMuch) when HowMuch rem 2 == 1 ->
-  {DroppedPair, BinRest, MRest} = drop_to_zero_red(Type, BinomTop, MStackRest, HowMuch div 2 + 1),
-  ?PAIR(_,Dropped,YellowSpoils) = DroppedPair,
-  {Dropped, ?BINOM_TREE(YellowSpoils,BinRest), MRest};
-%% here be dragons: subtract N - 1 to obtain second-to-last pair... then subtract one more.
-%% Fortunately, this double-propagates at most O(1) nodes, and the implementation is simple.
-force_green(?MSTACK(Type,BinomTop,MStackRest), HowMuch) when HowMuch rem 2 == 0 ->
-  %% NOTA BENE: since we borrow 1 less than we should, we actually subtract to RED
-  %% first, and then borrow one more for green.
-  %% thus, the color does NOT flip.
-  {DroppedPair, BinRest, MRest} = drop_to_zero_red(Type, BinomTop, MStackRest, HowMuch div 2),
-  ?PAIR(_,_Annihilated,Dropped) = DroppedPair,
-  %% okay, this was the pair we dropped, now for the real deal...
-  {BorrowedPair, BinRest1, MRest1} = drop_green(BinRest, MRest, 1),
-  BinRest2 = ?BINOM_TREE(BorrowedPair, BinRest1),
-  {Dropped, ?BINOM_EMPTY, ?MSTACK(green,BinRest2,MRest1)}.
-
--spec assert_green(latestack(T)) -> latestack(T).
-%% This is a function we call when we lose Green in the topmost stack.
-%% If the propagation has reached the next stack, this is a no-op,
-%% but subtracting e.g. 1 from 012 will need the hero that are we.
-%% spec: MStackRest - the second+ stacks.
-%% returns: new MStack. Guarantees to never drop anything.
-assert_green(?MSTACK_EMPTY) ->
-  ?MSTACK_EMPTY;
-assert_green(?MSTACK(red,BinomTop, MStackRest)) ->
-  {GreenPair, BinRest, MRest} = drop_green(BinomTop, MStackRest, 1),
-  ?MSTACK(green,?BINOM_TREE(GreenPair, BinRest), MRest);
-assert_green(MStack) ->
-  MStack.
 
 -ifdef(EUNIT).
 
@@ -386,7 +326,7 @@ basic_test() ->
   Exhaust = build(List),
   Lambda = fun
     Lambda({ok, E, Ex}, Acc) -> Lambda(drop(1, Ex), [E | Acc]);
-    Lambda({error, empty}, Acc) -> Acc
+    Lambda({too_much, 1, _, _}, Acc) -> Acc
   end,
   ?assertEqual(List, lists:reverse(Lambda(drop(1, Exhaust), []))).
 

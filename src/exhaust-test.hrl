@@ -8,9 +8,13 @@
 %%%-------------------------------------------------------------------
 -author("Alex S.").
 
--define(PAIR(V,X,Y),{exhaust_pair, V, X, Y}).
--define(BINOM_TREE(Pair,Rest),{exhaust_tree, Pair, Rest}).
--define(BINOM_EMPTY,{exhaust_tree, empty}).
--define(MSTACK(Type,Digits,Next),{exhaust_mstack, Type, Digits, Next}).
--define(MSTACK_EMPTY,{exhaust_mstack,empty}).
--define(MASK(X),{exhaust_mask,X}).
+-define(PAIR(X,Y),{X, Y}).
+-define(RED_NODE(Next,Meta,E),[{red, Next, E}|Meta]).
+-define(YELLOW_NODE(Next,E1,E2),[{yellow, E1, E2}|Next]).
+-define(GREEN_NODE(Next,Meta,E1,E2,E3),[{green, Next, E1, E2, E3}|Meta]).
+-define(EMPTY,[]).
+-define(EXHAUST(S,M),{exhaust,S,M}).
+
+-define(OPZERO(V,E),{V, E}).
+-define(OPONE(V,E1,E2),{V,E1,E2}).
+-define(OPTWO(V,E1,E2,E3),{V,E1,E2,E3}).
