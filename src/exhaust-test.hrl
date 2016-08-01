@@ -15,6 +15,6 @@
 -define(EMPTY,[]).
 -define(EXHAUST(S,M),{exhaust,S,M}).
 
--define(OPZERO(V,E),{V, E}).
+-define(OPZERO(V,E),{V,E}).
 -define(OPONE(V,E1,E2),{V,E1,E2}).
 -define(OPTWO(V,E1,E2,E3),{V,E1,E2,E3}).
