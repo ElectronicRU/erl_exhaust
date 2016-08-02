@@ -324,7 +324,7 @@ basic_test() ->
   Exhaust = build(List),
   Lambda = fun
     Lambda({ok, E, Ex}, Acc) -> Lambda(drop(1, Ex), [E | Acc]);
-    Lambda({too_much, 1, _, _}, Acc) -> Acc
+    Lambda({empty, _, _}, Acc) -> Acc
   end,
   ?assertEqual(List, lists:reverse(Lambda(drop(1, Exhaust), []))).
 
