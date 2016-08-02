@@ -100,18 +100,17 @@ build(List) ->
 
 
 -spec drop(HowMuch :: pos_integer(), exhaust(T)) ->
-  {ok, LastDropped :: T, Rest :: exhaust(T)} |
-  {too_much, Remain :: pos_integer(), LastDropped :: T, Rest :: exhaust(T)}.
+  {ok | empty, LastDropped :: T | empty, Rest :: exhaust(T)}.
 drop(0, _) ->
   error(badarg);
 drop(HowMuch, ?EXHAUST(Stack,Meta)) ->
   {Rest, Last, Stack1, Meta1} = sub(HowMuch, Stack, [], Meta),
   Meta2 = straighten(Meta1),
   case Rest of
-    0 ->
-      {ok, Last, ?EXHAUST(Stack1,Meta2)};
+    HowMuch ->
+      {empty, empty, ?EXHAUST(Stack1, Meta2)};
     _ ->
-      {too_much, Rest, Last, ?EXHAUST(Stack1,Meta2)}
+      {ok, Last, ?EXHAUST(Stack1,Meta2)}
   end.
 
 

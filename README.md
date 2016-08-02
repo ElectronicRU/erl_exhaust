@@ -18,7 +18,7 @@ my design decisions along the way.
     Exhaust = exhaust:create(List),
     {ok, Element, Exhaust1} = exhaust:drop(N, Exhaust),
     % or
-    {too_much, NRemaining, Last, Exhaust1} = exhaust:drop(N, Exhaust).
+    {empty, empty, Exhaust1} = exhaust:drop(N, Exhaust).
 
 In the future, the size function (even cached) might be added if is called for.
 
