@@ -10,7 +10,6 @@
 -author("Alex S.").
 
 %% API exports
--compile(export_all).
 -export_type([exhaust/1]).
 -export([build/1, drop/2]).
 
